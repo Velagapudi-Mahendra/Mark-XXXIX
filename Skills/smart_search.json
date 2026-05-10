@@ -1,0 +1,28 @@
+{
+  "name": "smart_search",
+  "description": "Search, extract key points, and save a curated answer.",
+  "parameters": ["query", "save_path"],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "web_search",
+      "description": "Search for {{query}}",
+      "args": { "query": "{{query}}", "max_results": 5 },
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "code_helper",
+      "description": "Extract and summarize the results",
+      "args": { "action": "summarize", "content": "Extract the essential answer to: {{query}}\n\nSearch results:\n{{output.1}}" },
+      "depends_on": [1]
+    },
+    {
+      "step": 3,
+      "tool": "file_processor",
+      "description": "Save the curated answer",
+      "args": { "action": "write", "file_path": "{{save_path}}", "content": "{{output.2}}" },
+      "depends_on": [2]
+    }
+  ]
+}

@@ -32,6 +32,7 @@ It's not just an assistant — it's an extension of your digital life.
 ## 🆕 What's New in XXXIX
 
 - 📂 **Advanced File Handling** — New support for direct file uploads. Drop PDFs, source code, or images into the assistant to have them analyzed, summarized, or edited instantly.
+- 🤖 **Custom Skill Library** — Define multi-step workflows as JSON files in `JARVIS_Workspace/Skills/`. You can trigger complex macros like `auto_refactor` or `morning_brief` directly from the UI or via voice command.
 - 🎨 **Adaptive & Flexible UI** — A complete overhaul of the interface. The new UI is fully resizable and responsive, featuring transparency controls and customizable layouts to fit your workspace perfectly.
 - 🐧🍎 **Refined Cross-Platform Stability** — Major fixes for macOS and Linux compatibility. Core system actions are now more consistent across all three major operating systems.
 - ⚡ **Optimized Core Engine** — Significant performance boost in tool-calling logic and response generation, resulting in a 40% faster interaction speed.

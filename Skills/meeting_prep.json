@@ -1,0 +1,21 @@
+{
+  "name": "meeting_prep",
+  "description": "Research a topic and compile key talking points into a brief.",
+  "parameters": ["topic", "attendees"],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "web_search",
+      "description": "Search for latest updates on {{topic}}",
+      "args": { "query": "latest news about {{topic}}", "max_results": 3 },
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "code_helper",
+      "description": "Summarize findings into a short brief",
+      "args": { "action": "summarize", "content": "Summarize these points into a 3-bullet meeting prep brief:\n{{output.1}}" },
+      "depends_on": [1]
+    }
+  ]
+}

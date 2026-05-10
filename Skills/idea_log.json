@@ -1,0 +1,19 @@
+{
+  "name": "idea_log",
+  "description": "Save a spontaneous idea into a searchable idea journal.",
+  "parameters": ["category", "idea"],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "file_processor",
+      "description": "Append idea to category log",
+      "args": {
+        "action": "write",
+        "instruction": "Append to file",
+        "file_path": "workspace/Journal/ideas_{{category}}.md",
+        "content": "{{timestamp}} - {{idea}}"
+      },
+      "depends_on": []
+    }
+  ]
+}

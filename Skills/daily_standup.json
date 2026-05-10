@@ -1,0 +1,19 @@
+{
+  "name": "daily_standup",
+  "description": "Record today's standup points into the daily log.",
+  "parameters": ["done", "today", "blockers"],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "file_processor",
+      "description": "Write standup to today's journal",
+      "args": {
+        "action": "write",
+        "instruction": "Append to file",
+        "file_path": "workspace/Journal/{{date}}.md",
+        "content": "## Standup\n- Done: {{done}}\n- Today: {{today}}\n- Blockers: {{blockers}}"
+      },
+      "depends_on": []
+    }
+  ]
+}

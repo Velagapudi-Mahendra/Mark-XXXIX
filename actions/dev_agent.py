@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from core.workspace import get_workspace_path # WORKSPACE
 
 
 def get_base_dir():
@@ -14,20 +15,12 @@ def get_base_dir():
 
 BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
-PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
+# WORKSPACE
+PROJECTS_DIR     = get_workspace_path() / "Code"
 MAX_FIX_ATTEMPTS = 5
-MODEL_PLANNER    = "gemini-2.5-flash"
-MODEL_WRITER     = "gemini-2.5-flash"
+from core.llm_provider import generate_text
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
-def _get_model(model_name: str):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model_name)
+# (Removed _get_api_key and _get_model in favor of core.llm_provider)
 
 
 def _strip_fences(text: str) -> str:
@@ -97,7 +90,6 @@ class RateLimitError(Exception):
 
 
 def _plan_project(description: str, language: str) -> dict:
-    model = _get_model(MODEL_PLANNER)
 
     prompt = f"""You are a senior software architect. Create a minimal, complete file plan for this project.
 
@@ -135,8 +127,8 @@ Critical rules:
 JSON:"""
 
     try:
-        response = model.generate_content(prompt)
-        raw = _strip_fences(response.text)
+        response = generate_text(prompt, force_nvidia=True)
+        raw = _strip_fences(response)
         return json.loads(raw)
     except json.JSONDecodeError as e:
         raise ValueError(f"Planner returned invalid JSON: {e}\nRaw: {response.text[:300]}")
@@ -153,7 +145,6 @@ def _write_file(
     project_dir: Path,
     already_written: dict[str, str],
 ) -> str:
-    model = _get_model(MODEL_WRITER)
 
     file_path = file_info["path"]
     file_desc = file_info.get("description", "")
@@ -214,8 +205,8 @@ General rules:
 Code for {file_path}:"""
 
     try:
-        response = model.generate_content(prompt)
-        code = _strip_fences(response.text)
+        response = generate_text(prompt, force_nvidia=True)
+        code = _strip_fences(response)
 
         full_path = project_dir / file_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
@@ -350,7 +341,6 @@ def _fix_files(
     entry_point: str,
 ) -> dict[str, str]:
 
-    model = _get_model(MODEL_PLANNER)
 
     error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()))
     error_type = _classify_error(error_output)
@@ -412,8 +402,8 @@ Rules:
 Fixed code for {fix_path}:"""
 
         try:
-            response = model.generate_content(prompt)
-            fixed = _strip_fences(response.text)
+            response = generate_text(prompt, force_nvidia=True)
+            fixed = _strip_fences(response)
 
             full_path = project_dir / fix_path
             full_path.parent.mkdir(parents=True, exist_ok=True)

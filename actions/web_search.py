@@ -2,6 +2,7 @@
 import json
 import sys
 from pathlib import Path
+from typing import Callable
 
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -21,38 +22,55 @@ def _get_api_key() -> str:
 def _gemini_search(query: str) -> str:
     from google import genai
 
-    client   = genai.Client(api_key=_get_api_key())
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=query,
-        config={"tools": [{"google_search": {}}]},
-    )
+    try:
+        client   = genai.Client(api_key=_get_api_key())
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=str(query),
+            config={"tools": [{"google_search": {}}]},
+        )
 
-    text = ""
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, "text") and part.text:
-            text += part.text
-
-    text = text.strip()
-    if not text:
-        raise ValueError("Gemini returned an empty response.")
-    return text
+        text = ""
+        if response.candidates and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, "text") and part.text:
+                    text += str(part.text)
+        
+        text = text.strip()
+        if not text:
+            # Check if there are grounding chunks or other parts
+            text = "Gemini returned no direct text, but search was performed."
+        return text
+    except Exception as e:
+        print(f"[WebSearch] Gemini error: {e}")
+        raise
 
 
 def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
     try:
         from ddgs import DDGS
     except ImportError:
-        from duckduckgo_search import DDGS
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            print("[WebSearch] No DuckDuckGo library installed. Run 'pip install ddgs'.")
+            return []
 
     results = []
-    with DDGS() as ddgs:
-        for r in ddgs.text(query, max_results=max_results):
-            results.append({
-                "title":   r.get("title",  ""),
-                "snippet": r.get("body",   ""),
-                "url":     r.get("href",   ""),
-            })
+    try:
+        with DDGS() as ddgs:
+            # DuckDuckGo search library can sometimes throw type errors internally
+            search_results = ddgs.text(str(query), max_results=int(max_results))
+            if search_results:
+                for r in search_results:
+                    if isinstance(r, dict):
+                        results.append({
+                            "title":   str(r.get("title",  "")),
+                            "snippet": str(r.get("body",   "")),
+                            "url":     str(r.get("href",   "")),
+                        })
+    except Exception as e:
+        print(f"[WebSearch] DDG Internal Error: {e}")
     return results
 
 
@@ -76,7 +94,7 @@ def _compare(items: list[str], aspect: str) -> str:
     try:
         return _gemini_search(query)
     except Exception as e:
-        print(f"[WebSearch] ⚠️ Gemini compare failed: {e} — falling back to DDG")
+        print(f"[WebSearch] WARN Gemini compare failed: {e} - falling back to DDG")
 
     # DDG fallback: fetch results per item and merge
     all_results: dict[str, list] = {}
@@ -86,25 +104,35 @@ def _compare(items: list[str], aspect: str) -> str:
         except Exception:
             all_results[item] = []
 
-    lines = [f"Comparison — {aspect.upper()}", "─" * 40]
+    lines = [f"Comparison - {aspect.upper()}", "-" * 40]
     for item in items:
-        lines.append(f"\n▸ {item}")
+        lines.append(f"\n- {item}")
         for r in all_results.get(item, [])[:2]:
             if r.get("snippet"):
-                lines.append(f"  • {r['snippet']}")
+                lines.append(f"  * {r['snippet']}")
     return "\n".join(lines)
 
 def web_search(
     parameters:     dict,
     response=None,
     player=None,
+    speak: Callable | None = None,
     session_memory=None,
 ) -> str:
     params = parameters or {}
-    query  = params.get("query", "").strip()
-    mode   = params.get("mode",  "search").lower().strip()
-    items  = params.get("items", [])
-    aspect = params.get("aspect", "general").strip() or "general"
+    
+    # 1. Defensively parse all parameters (Bug 1: dict+int fix)
+    query  = str(params.get("query", "")).strip()
+    mode   = str(params.get("mode",  "search")).lower().strip()
+    aspect = str(params.get("aspect", "general")).strip() or "general"
+    
+    raw_items = params.get("items", [])
+    if isinstance(raw_items, dict):
+        items = [str(k) for k in raw_items.keys()]
+    elif isinstance(raw_items, list):
+        items = [str(i) for i in raw_items]
+    else:
+        items = [str(raw_items)] if raw_items else []
 
     if not query and not items:
         return "Please provide a search query, sir."
@@ -115,27 +143,32 @@ def web_search(
     if player:
         player.write_log(f"[Search] {query or ', '.join(items)}")
 
-    print(f"[WebSearch] 🔍 Query: {query!r}  Mode: {mode}")
+    print(f"[WebSearch] SEARCH Query: {query!r}  Mode: {mode}")
+
+    if speak:
+        speak(f"Searching for {query or 'those items'}, sir. One moment.")
 
     try:
         if mode == "compare" and items:
-            print(f"[WebSearch] 📊 Comparing: {items}")
+            print(f"[WebSearch] COMPARE Comparing: {items}")
             result = _compare(items, aspect)
-            print("[WebSearch] ✅ Compare done.")
+            print("[WebSearch] OK Compare done.")
             return result
 
-        print("[WebSearch] 🌐 Trying Gemini...")
+        print("[WebSearch] WEB Trying Gemini...")
         try:
             result = _gemini_search(query)
-            print("[WebSearch] ✅ Gemini OK.")
+            print("[WebSearch] OK Gemini OK.")
             return result
         except Exception as e:
-            print(f"[WebSearch] ⚠️ Gemini failed ({e}) — trying DDG...")
+            print(f"[WebSearch] WARN Gemini failed ({e}) - trying DDG...")
+            if speak:
+                speak("I'm trying an alternative search provider, sir.")
             results = _ddg_search(query)
             result  = _format_ddg(query, results)
-            print(f"[WebSearch] ✅ DDG: {len(results)} result(s).")
+            print(f"[WebSearch] OK DDG: {len(results)} result(s).")
             return result
 
     except Exception as e:
-        print(f"[WebSearch] ❌ All backends failed: {e}")
+        print(f"[WebSearch] FAIL All backends failed: {e}")
         return f"Search failed, sir: {e}"

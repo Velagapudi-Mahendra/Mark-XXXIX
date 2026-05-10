@@ -1,0 +1,28 @@
+{
+  "name": "workspace_health",
+  "description": "Check CPU, memory, disk, and workspace size.",
+  "parameters": [],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "computer_control",
+      "description": "Get system resource info",
+      "args": { "action": "system_info" },
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "file_processor",
+      "description": "Calculate workspace folder size",
+      "args": { "action": "list", "file_path": "workspace/" },
+      "depends_on": []
+    },
+    {
+      "step": 3,
+      "tool": "code_helper",
+      "description": "Format results into a readable summary",
+      "args": { "action": "summarize", "content": "System: {{output.1}}\nWorkspace size info: {{output.2}}" },
+      "depends_on": [1, 2]
+    }
+  ]
+}

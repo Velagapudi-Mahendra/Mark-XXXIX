@@ -25,12 +25,24 @@ from actions.screen_processor  import screen_process
 from actions.youtube_video     import youtube_video
 from actions.desktop           import desktop_control
 from actions.browser_control   import browser_control
+from actions.browser_agent     import browser_agent_action
+import shutil
+from actions.browser_agent     import browser_agent_action, check_installation as check_browser_agent
+import shutil
 from actions.file_controller   import file_controller
 from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control
 from actions.game_updater      import game_updater
+from actions.nvidia_ai        import nvidia_chat
+from core.orchestrator       import AgentOrchestrator
+from core.context_manager    import ContextManager
+from core.multimodal_fusion  import MultimodalFusion
+from core.proactivity_engine import ProactivityEngine
+from core.skill_manager import SkillManager
+from core.workspace import init_workspace # WORKSPACE
+import memory.memory_manager as mm
 
 
 def get_base_dir():
@@ -197,28 +209,19 @@ TOOL_DECLARATIONS = [
     {
         "name": "browser_control",
         "description": (
-            "Controls any web browser. Use for: opening websites, searching the web, "
-            "clicking elements, filling forms, scrolling, screenshots, navigation, any web-based task. "
-            "Always pass the 'browser' parameter when the user specifies a browser (e.g. 'open in Edge', "
-            "'use Firefox', 'open Chrome'). Multiple browsers can run simultaneously."
+            "Controls any web browser via agent-browser CLI. "
+            "When interacting with web pages, you must first call action='snapshot' to get a list of interactive elements with their refs. "
+            "Then use those refs (e.g. '@e1', '@e2') in the 'ref' parameter for precise clicks and fills. "
+            "Use for: opening websites, snapshotting elements, clicking refs, filling form fields, screenshots, and closing."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"},
-                "browser":     {"type": "STRING", "description": "Target browser: chrome | edge | firefox | opera | operagx | brave | vivaldi | safari. Omit to use the currently active browser."},
-                "url":         {"type": "STRING", "description": "URL for go_to / new_tab action"},
-                "query":       {"type": "STRING", "description": "Search query for search action"},
-                "engine":      {"type": "STRING", "description": "Search engine: google | bing | duckduckgo | yandex (default: google)"},
-                "selector":    {"type": "STRING", "description": "CSS selector for click/type"},
-                "text":        {"type": "STRING", "description": "Text to click or type"},
-                "description": {"type": "STRING", "description": "Element description for smart_click/smart_type"},
-                "direction":   {"type": "STRING", "description": "up | down for scroll"},
-                "amount":      {"type": "INTEGER", "description": "Scroll amount in pixels (default: 500)"},
-                "key":         {"type": "STRING", "description": "Key name for press action (e.g. Enter, Escape, F5)"},
+                "action":      {"type": "STRING", "description": "open | snapshot | click | type | fill | screenshot | close"},
+                "url":         {"type": "STRING", "description": "URL for open action"},
+                "ref":         {"type": "STRING", "description": "Element ref (e.g., @e1) from snapshot for click or type"},
+                "text":        {"type": "STRING", "description": "Text to fill or type into an element"},
                 "path":        {"type": "STRING", "description": "Save path for screenshot"},
-                "incognito":   {"type": "BOOLEAN", "description": "Open in private/incognito mode"},
-                "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
             },
             "required": ["action"]
         }
@@ -478,6 +481,52 @@ TOOL_DECLARATIONS = [
             "required": ["category", "key", "value"]
         }
     },
+    {
+        "name": "nvidia_ai",
+        "description": "Calls NVIDIA NIM (Minimax) for advanced reasoning, chat, or complex analysis.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "prompt": {"type": "STRING", "description": "The prompt or question for the AI"},
+                "model":  {"type": "STRING", "description": "Model name. Default: minimaxai/minimax-m2.7"}
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
+        "name": "clear_context",
+        "description": "Clears the current session context and all active references. Use when the user wants a fresh start or to forget recent topics.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {}
+        }
+    },
+    {
+        "name": "execute_skill",
+        "description": "Triggers a pre-defined multi-step workflow (Skill) with specific parameters. Use this when the user's request matches a known routine like 'Morning Brief'.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "skill_name": {
+                    "type": "STRING",
+                    "description": "The identifier of the skill to execute (e.g., 'morning_brief')"
+                },
+                "params": {
+                    "type": "OBJECT",
+                    "description": "A key-value dictionary of parameters required by the skill."
+                }
+            },
+            "required": ["skill_name"]
+        }
+    },
+    {
+        "name": "reload_skills",
+        "description": "Re-scans the Skills directory and updates the in-memory skill library. Use this after manually editing or adding a skill JSON file.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {}
+        }
+    },
 ]
 
 class JarvisLive:
@@ -492,6 +541,54 @@ class JarvisLive:
         self._speaking_lock = threading.Lock()
         self.ui.on_text_command = self._on_text_command
         self._turn_done_event: asyncio.Event | None = None
+        
+        # WORKSPACE
+        self.workspace_path = init_workspace(API_CONFIG_PATH)
+
+        # New Core Systems
+        self.skill_manager = SkillManager(self.workspace_path)
+        self.ui.set_skills(self.skill_manager.list_skills(), self._trigger_skill_ui)
+        self.context_manager = ContextManager(mm)
+        self.orchestrator = AgentOrchestrator(ui=self.ui, speak=self.speak, skill_manager=self.skill_manager)
+        self.fusion = MultimodalFusion(api_key=_get_api_key())
+        self.proactivity = ProactivityEngine(
+            memory_manager=mm, 
+            ui=self.ui, 
+            orchestrator=self.orchestrator,
+            trust_level="auto" # Default to auto as per requirements
+        )
+        self.proactivity.start()
+
+        # FIX Bug 8: on startup, check for an unfinished orchestration task
+        if self.orchestrator.has_resumable_state():
+            saved_goal = self.orchestrator.state.get("goal", "a previous task")
+            self.ui.write_log(
+                f"SYS: Found unfinished task — {saved_goal!r}"
+            )
+            def _resume_cb():
+                import threading
+                threading.Thread(
+                    target=lambda: self.orchestrator.execute(
+                        goal=saved_goal, resume=True
+                    ),
+                    daemon=True,
+                ).start()
+            self.ui.show_suggestion(
+                f"Resume unfinished task: \"{saved_goal[:60]}\"",
+                _resume_cb,
+            )
+
+        # Wire right-click Clear Context from HUD
+        self.ui.on_clear_context = self._handle_clear_context
+
+        # Ensure state/ directory exists
+        import os
+        os.makedirs("state", exist_ok=True)
+
+    def _trigger_skill_ui(self, skill_name: str):
+        self.ui.write_log(f"USR: Run {skill_name}")
+        if self.ui.on_text_command:
+            self.ui.on_text_command(f"Run {skill_name}")
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -528,6 +625,24 @@ class JarvisLive:
         self.ui.write_log(f"ERR: {tool_name} — {short}")
         self.speak(f"Sir, {tool_name} encountered an error. {short}")
 
+    def _handle_clear_context(self):
+        """Called when user right-clicks Clear Context or says 'clear context'."""
+        self.context_manager.clear_context()
+        self.ui.write_log("SYS: Session context cleared.")
+        self.speak("Session context cleared, sir. I'm ready for a fresh start.")
+
+    def _handle_multimodal_intent(self, prompt: str):
+        """Captures screen/window context and sends a fused request to Gemini."""
+        try:
+            # capture() handles window focus resolution internally
+            fused_response = self.multimodal.capture(prompt)
+            if fused_response:
+                self.speak(fused_response)
+        except Exception as e:
+            self.ui.write_log(f"ERR: Multimodal Fusion failed: {e}")
+        finally:
+            self.ui.set_state("LISTENING")
+
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
 
@@ -546,7 +661,9 @@ class JarvisLive:
         parts = [time_ctx]
         if mem_str:
             parts.append(mem_str)
-        parts.append(sys_prompt)
+        # Inject dynamic context into the system prompt
+        full_sys_prompt = self.context_manager.inject_context(sys_prompt)
+        parts.append(full_sys_prompt)
 
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
@@ -592,14 +709,19 @@ class JarvisLive:
             if name == "open_app":
                 r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
                 result = r or f"Opened {args.get('app_name')}."
+                self.proactivity.log_action(f"open_{args.get('app_name', '').lower()}")
 
             elif name == "weather_report":
                 r = await loop.run_in_executor(None, lambda: weather_action(parameters=args, player=self.ui))
                 result = r or "Weather delivered."
 
             elif name == "browser_control":
-                r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
+                if shutil.which("agent-browser"):
+                    r = await loop.run_in_executor(None, lambda: browser_agent_action(parameters=args, player=self.ui))
+                else:
+                    r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
                 result = r or "Done."
+                self.proactivity.log_action("browser_usage")
 
             elif name == "file_controller":
                 r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
@@ -643,15 +765,19 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "agent_task":
-                from agent.task_queue import get_queue, TaskPriority
-                priority_map = {"low": TaskPriority.LOW, "normal": TaskPriority.NORMAL, "high": TaskPriority.HIGH}
-                priority = priority_map.get(args.get("priority", "normal").lower(), TaskPriority.NORMAL)
-                task_id  = get_queue().submit(goal=args.get("goal", ""), priority=priority, speak=self.speak)
-                result   = f"Task started (ID: {task_id})."
+                # FIX Bug 8: pass speak so the orchestrator can vocalise progress
+                goal = args.get("goal", "")
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: self.orchestrator.execute(goal=goal)
+                )
+                result = r or "Task orchestrated."
 
             elif name == "web_search":
                 r = await loop.run_in_executor(None, lambda: web_search_action(parameters=args, player=self.ui))
                 result = r or "Done."
+                self.proactivity.log_action("search_info")
+
             elif name == "file_processor":
                 if not args.get("file_path") and self.ui.current_file:
                     args["file_path"] = self.ui.current_file
@@ -673,6 +799,28 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
                 result = r or "Done."
 
+            elif name == "nvidia_ai":
+                r = await loop.run_in_executor(
+                    None, 
+                    lambda: nvidia_chat(parameters=args, player=self.ui, speak=self.speak)
+                )
+                result = r or "Done."
+
+            elif name == "execute_skill":
+                skill_name = args.get("skill_name")
+                params     = args.get("params", {})
+                self.orchestrator.trigger_skill(skill_name, params)
+                result = f"Executing skill: {skill_name}"
+
+            elif name == "reload_skills":
+                count = self.skill_manager.reload_skills()
+                self.ui.set_skills(self.skill_manager.list_skills(), self._trigger_skill_ui)
+                result = f"Skill library updated. Loaded {count} skills."
+
+            elif name == "clear_context":
+                self.context_manager.clear_context()
+                result = "Session context and active references have been cleared, sir."
+
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
                 self.speak("Goodbye, sir.")
@@ -681,6 +829,7 @@ class JarvisLive:
                     time.sleep(1)
                     os._exit(0)
                 threading.Thread(target=_shutdown, daemon=True).start()
+                result = "Shutting down."
 
             else:
                 result = f"Unknown tool: {name}"
@@ -690,6 +839,9 @@ class JarvisLive:
             traceback.print_exc()
             self.speak_error(name, e)
 
+        # Update context manager with the tool result
+        self.context_manager.add_message("assistant", f"Called tool {name} with args {args}", tool_results=[result])
+
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
@@ -698,6 +850,35 @@ class JarvisLive:
             id=fc.id, name=name,
             response={"result": result}
         )
+
+    def _handle_multimodal_intent(self, text: str):
+        """
+        Background handler for vision + audio fusion.
+        """
+        try:
+            # 1. Capture screen
+            screenshot_path = self.ui.get_last_screenshot()
+            
+            # 2. Check if webcam should be included
+            include_webcam = any(kw in text.lower() for kw in ["webcam", "camera", "am i holding", "see me"])
+            
+            # 3. Process multimodal
+            response = self.fusion.process_multimodal(
+                text=text, 
+                image_path=screenshot_path,
+                include_webcam=include_webcam
+            )
+            
+            # 4. Result handling
+            self.ui.write_log(f"JARVIS (Vision): {response}")
+            self.context_manager.add_message("assistant", response)
+            self.speak(response)
+            
+        except Exception as e:
+            print(f"[Fusion] Error: {e}")
+            self.speak("Sir, I encountered an error while analyzing the visual data.")
+        finally:
+            self.ui.set_state("IDLE")
 
     async def _send_realtime(self):
         while True:
@@ -766,11 +947,26 @@ class JarvisLive:
                             full_in = " ".join(in_buf).strip()
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
+                                self.context_manager.add_message("user", full_in)
+                                
+                                # Multimodal Trigger: Detect intent to "see" or "look" or "camera"
+                                vision_keywords = ["what is this", "look at", "on my screen", "this window", "see this", "camera", "webcam", "am i holding"]
+                                if any(k in full_in.lower() for k in vision_keywords):
+                                    self.ui.set_state("VISION_ACTIVE")
+                                    # Capture and fuse in background to avoid blocking audio loop
+                                    threading.Thread(
+                                        target=self._handle_multimodal_intent,
+                                        args=(full_in,),
+                                        daemon=True
+                                    ).start()
+                                    in_buf = [] # Clear buffer after trigger
+                                    continue
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
                                 self.ui.write_log(f"Jarvis: {full_out}")
+                                self.context_manager.add_message("assistant", full_out)
                             out_buf = []
 
                     if response.tool_call:

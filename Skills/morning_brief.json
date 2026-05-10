@@ -1,0 +1,35 @@
+
+{
+  "name": "morning_brief",
+  "description": "Synthesizes weather, top news, and today's schedule into a proactive briefing.",
+  "parameters": ["location", "interests"],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "web_search",
+      "description": "Get current weather for {{location}}",
+      "args": {
+        "query": "current weather in {{location}}",
+        "max_results": 1
+      }
+    },
+    {
+      "step": 2,
+      "tool": "web_search",
+      "description": "Get news headlines for {{interests}}",
+      "args": {
+        "query": "top news headlines today about {{interests}}",
+        "max_results": 3
+      }
+    },
+    {
+      "step": 3,
+      "tool": "code_helper",
+      "description": "Summarize weather and news into a natural language brief",
+      "args": {
+        "action": "summarize",
+        "content": "Weather: {{output.1}}\nNews: {{output.2}}\nContext: Prepare a high-energy morning briefing for the user."
+      }
+    }
+  ]
+}

@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTextEdit,
     QVBoxLayout, QWidget, QProgressBar,
 )
+from typing import Any, Callable, Dict, List
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -243,11 +244,15 @@ class _SysMetrics:
 _metrics = _SysMetrics()
 
 class HudCanvas(QWidget):
+    clear_context_requested = pyqtSignal()
+
     def __init__(self, face_path: str, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setMinimumSize(300, 300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
         self.muted    = False
         self.speaking = False
@@ -272,6 +277,18 @@ class HudCanvas(QWidget):
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
+
+    def _show_context_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{ background: {C.PANEL}; color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+            QMenu::item:selected {{ background: {C.PRI_GHO}; color: {C.PRI}; }}
+        """)
+        clear_action = menu.addAction("⟳  Clear Session Context")
+        action = menu.exec(self.mapToGlobal(pos))
+        if action == clear_action:
+            self.clear_context_requested.emit()
 
     def _load_face(self, path: str):
         try:
@@ -477,6 +494,12 @@ class HudCanvas(QWidget):
         elif self.state == "LISTENING":
             sym = "●" if self._blink else "○"
             txt, col = f"{sym}  LISTENING",  qcol(C.GREEN)
+        elif self.state == "VISION_ACTIVE":
+            sym = "👁" if self._blink else "·"
+            txt, col = f"{sym}  VISION ACTIVE", qcol(C.PRI)
+        elif self.state == "ORCHESTRATING":
+            sym = "⚙" if self._blink else "·"
+            txt, col = f"{sym}  ORCHESTRATING", qcol(C.ACC)
         else:
             sym = "●" if self._blink else "○"
             txt, col = f"{sym}  {self.state}", qcol(C.PRI)
@@ -798,7 +821,132 @@ class _DropCanvas(QWidget):
         p.setFont(QFont("Courier New", 7))
         p.setPen(QPen(qcol("#1a4a5a"), 1))
         p.drawText(QRectF(0, cy + 24, W, 14), Qt.AlignmentFlag.AlignCenter,
-                   "Images · Video · Audio · PDF · Docs · Code · Data")
+                   "File context expires in 5 minutes")
+
+class TaskStepWidget(QFrame):
+    """Represents a single step in the orchestrator DAG."""
+    def __init__(self, step_num: int, tool: str, desc: str, parent=None):
+        super().__init__(parent)
+        self.step_num = step_num
+        self.setFixedHeight(45)
+        self.setStyleSheet(f"""
+            QFrame {{
+                background: {C.PANEL2};
+                border: 1px solid {C.BORDER};
+                border-radius: 4px;
+                margin-bottom: 2px;
+            }}
+        """)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 4, 8, 4)
+        
+        self.icon_lbl = QLabel("○")
+        self.icon_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; font-weight: bold;")
+        lay.addWidget(self.icon_lbl)
+        
+        info_lay = QVBoxLayout()
+        self.tool_lbl = QLabel(f"STEP {step_num}: {tool.upper()}")
+        self.tool_lbl.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        self.tool_lbl.setStyleSheet(f"color: {C.PRI_DIM};")
+        
+        self.desc_lbl = QLabel(desc)
+        self.desc_lbl.setFont(QFont("Courier New", 8))
+        self.desc_lbl.setStyleSheet(f"color: {C.TEXT};")
+        
+        info_lay.addWidget(self.tool_lbl)
+        info_lay.addWidget(self.desc_lbl)
+        lay.addLayout(info_lay, stretch=1)
+        
+    def set_status(self, status: str): # pending, running, done, error
+        if status == "running":
+            self.icon_lbl.setText("●")
+            self.icon_lbl.setStyleSheet(f"color: {C.ACC};")
+            self.setStyleSheet(f"QFrame {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}")
+        elif status == "done":
+            self.icon_lbl.setText("✓")
+            self.icon_lbl.setStyleSheet(f"color: {C.GREEN};")
+            self.setStyleSheet(f"QFrame {{ background: {C.PANEL2}; border: 1px solid {C.GREEN_D}; }}")
+        elif status == "error":
+            self.icon_lbl.setText("✕")
+            self.icon_lbl.setStyleSheet(f"color: {C.RED};")
+            self.setStyleSheet(f"QFrame {{ background: {C.PANEL2}; border: 1px solid {C.RED}; }}")
+
+class TaskProgressPanel(QScrollArea):
+    """Panel showing the current task DAG progress."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setStyleSheet("background: transparent; border: none;")
+        self.container = QWidget()
+        self.container.setStyleSheet("background: transparent;")
+        self.layout = QVBoxLayout(self.container)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(4)
+        self.layout.addStretch()
+        self.setWidget(self.container)
+        self.steps: Dict[int, TaskStepWidget] = {}
+
+    def set_plan(self, steps_data: List[Dict[str, Any]]):
+        # Clear existing
+        for i in reversed(range(self.layout.count())):
+            w = self.layout.itemAt(i).widget()
+            if w: w.setParent(None)
+        self.steps = {}
+        self.layout.addStretch() # keep stretch at bottom
+        
+        for s in steps_data:
+            num = s.get("step", 0)
+            w = TaskStepWidget(num, s.get("tool", ""), s.get("description", ""))
+            self.layout.insertWidget(self.layout.count()-1, w)
+            self.steps[num] = w
+
+    def update_step(self, step_num: int, status: str):
+        if step_num in self.steps:
+            self.steps[step_num].set_status(status)
+
+class SuggestionBar(QFrame):
+    """Top bar for proactive suggestions."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(0) # Hidden by default
+        self.setStyleSheet(f"background: {C.PRI_GHO}; border-bottom: 1px solid {C.PRI};")
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(20, 0, 20, 0)
+        
+        self.label = QLabel("")
+        self.label.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self.label.setStyleSheet(f"color: {C.TEXT};")
+        self.layout.addWidget(self.label)
+        
+        self.layout.addStretch()
+        
+        self.yes_btn = QPushButton("EXECUTE")
+        self.yes_btn.setFixedSize(80, 24)
+        self.yes_btn.setStyleSheet(f"background: {C.GREEN_D}; color: {C.WHITE}; border-radius: 3px;")
+        self.layout.addWidget(self.yes_btn)
+        
+        self.no_btn = QPushButton("DISMISS")
+        self.no_btn.setFixedSize(80, 24)
+        self.no_btn.setStyleSheet(f"background: {C.RED}; color: {C.WHITE}; border-radius: 3px;")
+        self.layout.addWidget(self.no_btn)
+        
+        self.callback = None
+        self.yes_btn.clicked.connect(self._on_yes)
+        self.no_btn.clicked.connect(self.hide_suggestion)
+
+    def show_suggestion(self, text: str, callback: Callable):
+        self.label.setText(text)
+        self.callback = callback
+        self.setFixedHeight(40)
+        
+    def hide_suggestion(self):
+        self.setFixedHeight(0)
+        self.callback = None
+
+    def _on_yes(self):
+        if self.callback:
+            self.callback()
+        self.hide_suggestion()
 
     def _paint_drag_over(self, p, W, H):
         cx, cy = W / 2, H / 2
@@ -983,10 +1131,52 @@ class SetupOverlay(QWidget):
             return
         self.done.emit(key, self._sel_os)
 
+class SkillsPanel(QScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setStyleSheet("background: transparent;")
+        
+        self.container = QWidget()
+        self.container.setStyleSheet("background: transparent;")
+        self.vbox = QVBoxLayout(self.container)
+        self.vbox.setContentsMargins(0, 0, 0, 0)
+        self.vbox.setSpacing(4)
+        self.vbox.addStretch()
+        
+        self.setWidget(self.container)
+
+    def set_skills(self, skills: list, callback: Callable):
+        while self.vbox.count() > 1:
+            item = self.vbox.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        for sk in skills:
+            btn = QPushButton(f"⚡ {sk['name']}")
+            desc = sk.get('description', '')
+            if desc:
+                btn.setToolTip(desc)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {C.PANEL2}; color: {C.TEXT}; text-align: left; padding: 4px;
+                    border: 1px solid {C.BORDER}; border-radius: 3px; font-family: Courier New; font-size: 11px;
+                }}
+                QPushButton:hover {{
+                    background: {C.BORDER}; border: 1px solid {C.PRI}; color: {C.WHITE};
+                }}
+            """)
+            btn.clicked.connect(lambda checked, name=sk['name']: callback(name))
+            self.vbox.insertWidget(self.vbox.count() - 1, btn)
+
 
 class MainWindow(QMainWindow):
-    _log_sig   = pyqtSignal(str)
-    _state_sig = pyqtSignal(str)
+    _log_sig        = pyqtSignal(str)
+    _state_sig      = pyqtSignal(str)
+    _task_plan_sig  = pyqtSignal(list)
+    _task_step_sig  = pyqtSignal(int, str)
+    _suggest_sig    = pyqtSignal(str, object)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1008,27 +1198,32 @@ class MainWindow(QMainWindow):
         central.setStyleSheet(f"background: {C.BG};")
         self.setCentralWidget(central)
 
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(self._build_header())
+        main_lay = QVBoxLayout(central)
+        main_lay.setContentsMargins(0, 0, 0, 0)
+        main_lay.setSpacing(0)
+        main_lay.addWidget(self._build_header())
 
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
+        self.suggestion_bar = SuggestionBar()
+        main_lay.addWidget(self.suggestion_bar)
+
+        content_lay = QHBoxLayout()
+        main_lay.addLayout(content_lay)
 
         self._left_panel = self._build_left_panel()
-        body.addWidget(self._left_panel, stretch=0)
+        content_lay.addWidget(self._left_panel, stretch=0)
 
         self.hud = HudCanvas(face_path)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        body.addWidget(self.hud, stretch=5)
+        content_lay.addWidget(self.hud, stretch=5)
 
         self._right_panel = self._build_right_panel()
-        body.addWidget(self._right_panel, stretch=0)
+        content_lay.addWidget(self._right_panel, stretch=0)
 
-        root.addLayout(body, stretch=1)
-        root.addWidget(self._build_footer())
+        main_lay.addWidget(self._build_footer())
+
+        self._task_plan_sig.connect(self._task_panel.set_plan)
+        self._task_step_sig.connect(self._task_panel.update_step)
+        self._suggest_sig.connect(self.suggestion_bar.show_suggestion)
 
         self._clock_tmr = QTimer(self)
         self._clock_tmr.timeout.connect(self._tick_clock)
@@ -1043,6 +1238,7 @@ class MainWindow(QMainWindow):
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
+        self.hud.clear_context_requested.connect(self._on_clear_context)
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -1059,6 +1255,12 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+
+    def _on_clear_context(self):
+        self._log.append_log("SYS: Clearing session context...")
+        if callable(getattr(self, "on_clear_context", None)):
+            import threading
+            threading.Thread(target=self.on_clear_context, daemon=True).start()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1257,6 +1459,10 @@ class MainWindow(QMainWindow):
         self._log = LogWidget()
         lay.addWidget(self._log, stretch=1)
 
+        lay.addWidget(_sec("TASK PROGRESS"))
+        self._task_panel = TaskProgressPanel()
+        lay.addWidget(self._task_panel, stretch=1)
+
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         lay.addWidget(sep)
@@ -1275,6 +1481,15 @@ class MainWindow(QMainWindow):
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         lay.addWidget(sep2)
+
+        lay.addWidget(_sec("MACRO SKILLS"))
+        self._skills_panel = SkillsPanel()
+        self._skills_panel.setFixedHeight(90)
+        lay.addWidget(self._skills_panel)
+
+        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        lay.addWidget(sep3)
 
         lay.addWidget(_sec("COMMAND INPUT"))
         lay.addLayout(self._build_input_row())
@@ -1501,3 +1716,23 @@ class JarvisUI:
     def stop_speaking(self):
         if not self.muted:
             self.set_state("LISTENING")
+
+    def set_task_plan(self, steps: List[Dict[str, Any]]):
+        self._win._task_plan_sig.emit(steps)
+
+    def update_task_step(self, step_num: int, status: str):
+        self._win._task_step_sig.emit(step_num, status)
+
+    def show_suggestion(self, text: str, callback: Callable):
+        self._win._suggest_sig.emit(text, callback)
+
+    @property
+    def on_clear_context(self):
+        return getattr(self._win, "on_clear_context", None)
+
+    @on_clear_context.setter
+    def on_clear_context(self, cb):
+        self._win.on_clear_context = cb
+
+    def set_skills(self, skills: list, callback: Callable):
+        self._win._skills_panel.set_skills(skills, callback)

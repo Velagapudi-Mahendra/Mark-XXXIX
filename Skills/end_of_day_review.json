@@ -1,0 +1,21 @@
+{
+  "name": "end_of_day_review",
+  "description": "Review today's journal entries and create a summary for tomorrow.",
+  "parameters": [],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "file_processor",
+      "description": "Read today's journal",
+      "args": { "action": "read", "file_path": "workspace/Journal/{{date}}.md" },
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "code_helper",
+      "description": "Distill today's log into a concise summary",
+      "args": { "action": "summarize", "content": "Summarize the following journal entry into a short end-of-day reflection:\n{{output.1}}" },
+      "depends_on": [1]
+    }
+  ]
+}

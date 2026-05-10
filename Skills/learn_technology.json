@@ -1,0 +1,32 @@
+{
+  "name": "learn_technology",
+  "description": "Research a technology, get a summary, and generate a 'hello world' example.",
+  "parameters": ["tech"],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "web_search",
+      "description": "Search for overview and best practices for {{tech}}",
+      "args": { "query": "{{tech}} overview and best practices", "max_results": 2 },
+      "depends_on": []
+    },
+    {
+      "step": 2,
+      "tool": "code_helper",
+      "description": "Generate a simple hello world example for {{tech}}",
+      "args": { "action": "write_code", "content": "Write a minimal 'Hello World' example in {{tech}}" },
+      "depends_on": []
+    },
+    {
+      "step": 3,
+      "tool": "file_processor",
+      "description": "Save the example to the workspace",
+      "args": {
+        "action": "write",
+        "file_path": "workspace/Code/{{tech}}_example.py",
+        "content": "{{output.2}}"
+      },
+      "depends_on": [2]
+    }
+  ]
+}

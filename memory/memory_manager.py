@@ -3,6 +3,8 @@ from datetime import datetime
 from threading import Lock
 from pathlib import Path
 import sys
+import re
+
 
 
 def get_base_dir() -> Path:
@@ -19,12 +21,14 @@ MEMORY_MAX_CHARS = 2200
 
 def _empty_memory() -> dict:
     return {
-        "identity":      {},
-        "preferences":   {},
-        "projects":      {},
-        "relationships": {},
-        "wishes":        {},
-        "notes":         {},
+        "identity":         {},
+        "preferences":      {},
+        "projects":         {},
+        "relationships":    {},
+        "wishes":           {},
+        "notes":            {},
+        "habits":           {},
+        "system_knowledge": {},
     }
 
 def load_memory() -> dict:
@@ -41,7 +45,7 @@ def load_memory() -> dict:
                 return data
             return _empty_memory()
         except Exception as e:
-            print(f"[Memory] ⚠️ Load error: {e}")
+            print(f"[Memory] Load error: {e}")
             return _empty_memory()
 
 def _all_entries(memory: dict) -> list[tuple]:
@@ -64,7 +68,7 @@ def _trim_to_limit(memory: dict) -> dict:
         if len(json.dumps(memory, ensure_ascii=False)) <= MEMORY_MAX_CHARS:
             break
         del memory[cat][key]
-        print(f"[Memory] 🗑️  Trimmed {cat}/{key}")
+        print(f"[Memory] Trimmed {cat}/{key}")
     return memory
 
 def save_memory(memory: dict) -> None:
@@ -85,6 +89,20 @@ def _truncate_value(val: str) -> str:
     return val
 
 
+def _normalize_fact(fact: str) -> str:
+    """
+    Normalizes a fact string for deduplication:
+    lowercase, stripped, and version '.0' suffixes removed.
+    """
+    if not isinstance(fact, str):
+        fact = str(fact)
+    fact = fact.lower().strip()
+    # Regex to strip .0 version suffixes (e.g. 3.12.0 -> 3.12)
+    # Only if it's at the end of a word or string
+    fact = re.sub(r'\.0(?!\d)', '', fact)
+    return fact
+
+
 def _recursive_update(target: dict, updates: dict) -> bool:
     changed = False
     for key, value in updates.items():
@@ -99,11 +117,24 @@ def _recursive_update(target: dict, updates: dict) -> bool:
             if _recursive_update(target[key], value):
                 changed = True
         else:
-            new_val  = _truncate_value(str(value["value"] if isinstance(value, dict) else value))
-            entry    = {"value": new_val, "updated": datetime.now().strftime("%Y-%m-%d")}
-            existing = target.get(key, {})
+            new_val_raw = value["value"] if isinstance(value, dict) else value
+            new_val     = _truncate_value(str(new_val_raw))
+            entry       = {"value": new_val, "updated": datetime.now().strftime("%Y-%m-%d")}
+            
+            # Normalization check for system_knowledge deduplication
+            existing_key = key
+            if any(k.lower() == key.lower() for k in target.keys()):
+                # If we have an existing key that differs only by case, use it to overwrite
+                for k in target.keys():
+                    if k.lower() == key.lower():
+                        existing_key = k
+                        break
+
+            existing = target.get(existing_key, {})
             if not isinstance(existing, dict) or existing.get("value") != new_val:
-                target[key] = entry
+                # For system_knowledge, we might want deeper deduplication
+                # but for now, we follow the key-overwrite rule.
+                target[existing_key] = entry
                 changed = True
     return changed
 
@@ -114,7 +145,7 @@ def update_memory(memory_update: dict) -> dict:
     memory = load_memory()
     if _recursive_update(memory, memory_update):
         save_memory(memory)
-        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
+        print(f"[Memory] Saved: {list(memory_update.keys())}")
     return memory
 
 def format_memory_for_prompt(memory: dict | None) -> str:
@@ -183,6 +214,15 @@ def format_memory_for_prompt(memory: dict | None) -> str:
             if val:
                 lines.append(f"  - {key}: {val}")
 
+    sys_k = memory.get("system_knowledge", {})
+    if sys_k:
+        lines.append("")
+        lines.append("Technical Context / Project Details:")
+        for key, entry in list(sys_k.items())[:15]:
+            val = entry.get("value") if isinstance(entry, dict) else entry
+            if val:
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+
     if not lines:
         return ""
 
@@ -194,9 +234,21 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     return result + "\n"
 
 def remember(key: str, value: str, category: str = "notes") -> str:
-    valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
+    valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes", "habits", "system_knowledge"}
     if category not in valid:
         category = "notes"
+    
+    # Apply normalization if saving to system_knowledge
+    if category == "system_knowledge":
+        # Check for existing normalized fact to avoid duplicates
+        memory = load_memory()
+        cat_data = memory.get(category, {})
+        norm_new = _normalize_fact(value)
+        
+        for k, v in cat_data.items():
+            if _normalize_fact(v.get("value", "")) == norm_new:
+                return f"Fact already known (normalized): {category}/{k}"
+
     update_memory({category: {key: {"value": value}}})
     return f"Remembered: {category}/{key} = {value}"
 

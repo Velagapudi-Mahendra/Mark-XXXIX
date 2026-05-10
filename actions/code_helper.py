@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from core.workspace import get_workspace_path # WORKSPACE
 
 
 def get_base_dir():
@@ -11,22 +12,13 @@ def get_base_dir():
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent
 
-BASE_DIR           = get_base_dir()
-API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"
-DESKTOP            = Path.home() / "Desktop"
+# WORKSPACE
+DEFAULT_DIR        = get_workspace_path() / "Code"
 MAX_BUILD_ATTEMPTS = 3
-GEMINI_MODEL       = "gemini-2.5-flash"
+from core.llm_provider import generate_text, _load_config
 
 
-def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
-
-
-def _get_gemini(model: str = GEMINI_MODEL):
-    import google.generativeai as genai
-    genai.configure(api_key=_get_api_key())
-    return genai.GenerativeModel(model)
+# (Removed _get_api_key and _get_gemini in favor of core.llm_provider)
 
 
 def _clean_code(text: str) -> str:
@@ -47,10 +39,15 @@ def _resolve_save_path(output_path: str, language: str) -> Path:
         "sql": ".sql", "json": ".json", "rust": ".rs", "go": ".go",
     }
     if output_path:
+        # WORKSPACE: Handle shortcut resolution
+        if output_path.lower().startswith("workspace/"):
+            parts = Path(output_path).parts
+            return get_workspace_path().joinpath(*parts[1:])
+            
         p = Path(output_path)
-        return p if p.is_absolute() else DESKTOP / p
+        return p if p.is_absolute() else DEFAULT_DIR / p
     ext = ext_map.get((language or "python").lower(), ".py")
-    return DESKTOP / f"jarvis_code{ext}"
+    return DEFAULT_DIR / f"jarvis_code{ext}"
 
 
 def _read_file(file_path: str) -> tuple[str, str]:
@@ -146,7 +143,6 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
 
 def _write(description: str, language: str, output_path: str, player=None) -> tuple[str, Path]:
     lang  = language or "python"
-    model = _get_gemini()
 
     prompt = f"""You are an expert {lang} developer.
 Write clean, working, well-commented {lang} code for the description below.
@@ -161,15 +157,14 @@ Description: {description}
 
 Code:"""
 
-    response = model.generate_content(prompt)
-    code     = _clean_code(response.text)
+    code     = generate_text(prompt, force_nvidia=True)
+    code     = _clean_code(code)
     path     = _resolve_save_path(output_path, lang)
     _save_file(path, code)
     return code, path
 
 
 def _fix_code(code: str, error_output: str, description: str) -> str:
-    model  = _get_gemini()
     prompt = f"""You are an expert debugger.
 The code below failed with the following error. Fix it.
 Return ONLY the corrected code — no explanation, no markdown, no backticks.
@@ -184,8 +179,8 @@ Broken code:
 
 Fixed code:"""
 
-    response = model.generate_content(prompt)
-    return _clean_code(response.text)
+    code     = generate_text(prompt, force_nvidia=True)
+    return _clean_code(code)
 
 
 def _run_file(path: Path, args: list, timeout: int) -> str:
@@ -302,8 +297,6 @@ def _edit_action(file_path, instruction, player) -> str:
 
     if player:
         player.write_log("[Code] Editing file...")
-
-    model  = _get_gemini()
     prompt = f"""You are an expert code editor.
 Apply the following change to the code below.
 Return ONLY the complete updated code — no explanation, no markdown, no backticks.
@@ -316,8 +309,8 @@ Original code:
 Updated code:"""
 
     try:
-        response = model.generate_content(prompt)
-        edited   = _clean_code(response.text)
+        response = generate_text(prompt, force_nvidia=True)
+        edited   = _clean_code(response)
     except Exception as e:
         return f"Could not edit code: {e}"
 
@@ -337,7 +330,6 @@ def _explain_action(file_path, code, player) -> str:
     if player:
         player.write_log("[Code] Analyzing code...")
 
-    model  = _get_gemini()
     prompt = f"""Explain what this code does in simple, clear language.
 Focus on: what it does, how it works, and any important details.
 Be concise — 3 to 6 sentences maximum.
@@ -348,8 +340,8 @@ Code:
 Explanation:"""
 
     try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        response = generate_text(prompt, force_nvidia=True)
+        return response.strip()
     except Exception as e:
         return f"Could not explain code: {e}"
 
@@ -378,7 +370,6 @@ def _optimize_action(file_path, code, language, output_path, player) -> str:
         player.write_log("[Code] Optimizing code...")
 
     lang  = language or "python"
-    model = _get_gemini()
 
     prompt = f"""You are an expert {lang} developer and code reviewer.
 Optimize the following code for:
@@ -395,8 +386,8 @@ Original code:
 Optimized code:"""
 
     try:
-        response  = model.generate_content(prompt)
-        optimized = _clean_code(response.text)
+        response  = generate_text(prompt, force_nvidia=True)
+        optimized = _clean_code(response)
     except Exception as e:
         return f"Could not optimize code: {e}"
 
@@ -444,7 +435,12 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=_get_api_key())
+        config = _load_config()
+        api_key = config.get("gemini_api_key")
+        if not api_key:
+             return "Gemini API Key not found. Screen analysis disabled."
+
+        client = genai.Client(api_key=api_key)
 
         image_bytes  = screenshot_path.read_bytes()
         image_base64 = _image_to_base64(screenshot_path)

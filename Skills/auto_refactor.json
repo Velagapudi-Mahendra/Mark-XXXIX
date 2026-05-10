@@ -1,0 +1,16 @@
+{
+  "name": "auto_refactor",
+  "description": "Automatically audits and refactors a target file to align with clean code principles.",
+  "parameters": ["target_file"],
+  "steps": [
+    {
+      "step": 1,
+      "tool": "code_helper",
+      "description": "Refactor the specified codebase/file",
+      "args": {
+        "action": "refactor",
+        "file_path": "{{target_file}}"
+      }
+    }
+  ]
+}

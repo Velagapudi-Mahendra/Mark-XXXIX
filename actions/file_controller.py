@@ -3,6 +3,7 @@ import shutil
 import platform
 from pathlib import Path
 from datetime import datetime
+from core.workspace import get_workspace_path # WORKSPACE
 
 try:
     import send2trash
@@ -14,12 +15,18 @@ _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 _SAFE_ROOTS: list[Path] = [
     Path.home(),
+    Path(__file__).resolve().parent.parent, # PROJECT ROOT
 ]
 
 def _is_safe_path(target: Path) -> bool:
-    """Verilen path _SAFE_ROOTS içinde mi? Değilse işlemi reddet."""
+    """Verilen path _SAFE_ROOTS veya Workspace içinde mi? Değilse işlemi reddet."""
     try:
         resolved = target.resolve()
+        # WORKSPACE
+        ws = get_workspace_path()
+        if ws and (resolved == ws.resolve() or resolved.is_relative_to(ws.resolve())):
+            return True
+            
         return any(
             resolved == root.resolve() or resolved.is_relative_to(root.resolve())
             for root in _SAFE_ROOTS
@@ -79,10 +86,18 @@ def _resolve_path(raw: str) -> Path:
         "music":     _get_music(),
         "videos":    _get_videos(),
         "home":      Path.home(),
+        "workspace": get_workspace_path(), # WORKSPACE
     }
-    lower = raw.strip().lower()
-    if lower in shortcuts:
-        return shortcuts[lower]
+    raw = raw.strip()
+    # FIX: Handle path resolution for shortcuts in the first component (Bug 2)
+    # This allows 'desktop/file.txt' to resolve to 'C:\Users\user\Desktop\file.txt'
+    parts = Path(raw).parts
+    if parts and parts[0].lower() in shortcuts:
+        base = shortcuts[parts[0].lower()]
+        if len(parts) > 1:
+            return base.joinpath(*parts[1:])
+        return base
+        
     return Path(raw).expanduser()
 
 def _format_size(b: int) -> str:
